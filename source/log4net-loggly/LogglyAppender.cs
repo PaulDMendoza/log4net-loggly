@@ -24,25 +24,18 @@ namespace log4net.loggly
 
         protected override void Append(LoggingEvent loggingEvent)
         {
-            loggingEvent.Properties["LoggingThread"] = Thread.CurrentThread.Name;
-
-            //adding ThreadContextProperties value to the logging event properties as 
-            //we are going to create a new thread to log the message
-            //so current ThreadContextProperties will not be present there.
-            if (ThreadContext.Properties.GetKeys().Length > 0)
-            {
-                foreach (string key in ThreadContext.Properties.GetKeys())
-                {
-                    loggingEvent.Properties[key] = ThreadContext.Properties[key];
-                }
-            }
-            ThreadPool.QueueUserWorkItem(x => SendLogAction(loggingEvent));
+            SendLogAction(loggingEvent);
         }
 
         private void SendLogAction(LoggingEvent loggingEvent)
         {
             Formatter.AppendAdditionalLoggingInformation(Config, loggingEvent);
-            Client.Send(Config, Formatter.ToJson(loggingEvent));
+
+            //we should always format event in the same thread as 
+            //many properties used in the event are associated with the current thread
+            //like threadname, ndc stacks, threadcontent properties etc.
+            string _formattedLog = Formatter.ToJson(loggingEvent);
+            ThreadPool.QueueUserWorkItem(x => Client.Send(Config, _formattedLog));
         }
 
 	}

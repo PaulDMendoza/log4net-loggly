@@ -23,12 +23,16 @@ namespace log4net.loggly
 
 	    public virtual string ToJson(LoggingEvent loggingEvent)
 	    {
-            return JsonConvert.SerializeObject(PreParse(loggingEvent)); 
+            return JsonConvert.SerializeObject(PreParse(loggingEvent), new JsonSerializerSettings(){
+                ReferenceLoopHandling = ReferenceLoopHandling.Ignore
+            }); 
 	    }
 
         public virtual string ToJson(IEnumerable<LoggingEvent> loggingEvents)
 		{
-            return JsonConvert.SerializeObject(loggingEvents.Select(PreParse));
+            return JsonConvert.SerializeObject(loggingEvents.Select(PreParse),new JsonSerializerSettings(){
+                ReferenceLoopHandling = ReferenceLoopHandling.Ignore
+            });
 		}
 
         /// <summary>
@@ -44,12 +48,12 @@ namespace log4net.loggly
             _loggingInfo.level = loggingEvent.Level.DisplayName;
             _loggingInfo.hostName = Environment.MachineName;
             _loggingInfo.process = _currentProcess.ProcessName;
-            _loggingInfo.threadName = loggingEvent.Properties["LoggingThread"] ?? loggingEvent.ThreadName;
+            _loggingInfo.threadName = loggingEvent.ThreadName;
             _loggingInfo.loggerName = loggingEvent.LoggerName;
 
             //handling messages
             object _objInfo = null;
-            string _message = getMessageAndObjectInfo(loggingEvent, out _objInfo);
+            string _message = GetMessageAndObjectInfo(loggingEvent, out _objInfo);
 
             if (_message != string.Empty)
             {
@@ -58,29 +62,44 @@ namespace log4net.loggly
 
             if (_objInfo != null)
             {
-                _loggingInfo.objectInfo = _objInfo;
+                var p = _loggingInfo as IDictionary<string, object>;
+
+                var _properties = _objInfo.GetType().GetProperties();
+                foreach (var property in _properties)
+                {
+                    p[property.Name] = property.GetValue(_objInfo, null);
+                }
             }
             
             //handling exceptions
-            dynamic _exceptionInfo = getExceptionInfo(loggingEvent);
+            dynamic _exceptionInfo = GetExceptionInfo(loggingEvent);
             if (_exceptionInfo != null)
             {
-                _loggingInfo.exceptionObject = _exceptionInfo;
+                _loggingInfo.exception = _exceptionInfo;
             }
 
-
-            //removing "LoggingThread" property as we will be checking for
-            //ThreadStackProperties and do not need this one.
-            loggingEvent.Properties.Remove("LoggingThread");
-
-            if (loggingEvent.Properties.Count > 0)
+            //handling threadcontext properties
+            string[] _threadContextProperties = ThreadContext.Properties.GetKeys();
+            if (_threadContextProperties != null && _threadContextProperties.Any())
             {
                 var p = _loggingInfo as IDictionary<string, object>;
-                foreach (string key in loggingEvent.Properties.GetKeys())
+                foreach (string key in _threadContextProperties)
                 {
-                    //adding all the ThreadContent Properties
-                    //as key value to the parent object
-                    p[key] = loggingEvent.Properties[key];
+                    //handling threadstack
+                    if (ThreadContext.Properties[key].GetType() ==
+                        typeof(log4net.Util.ThreadContextStack))
+                    {
+                        string[] stackArray;
+                        if (IncludeThreadStackValues(ThreadContext.Properties[key]
+                            as log4net.Util.ThreadContextStack, out stackArray))
+                        {
+                            p[key] = stackArray;
+                        }
+                    }
+                    else
+                    {
+                        p[key] = ThreadContext.Properties[key];
+                    }
                 }
             }
 
@@ -92,7 +111,7 @@ namespace log4net.loggly
         /// </summary>
         /// <param name="loggingEvent"></param>
         /// <returns></returns>
-        private object getExceptionInfo(LoggingEvent loggingEvent)
+        private object GetExceptionInfo(LoggingEvent loggingEvent)
         {
             if (loggingEvent.ExceptionObject == null)
                 return null;
@@ -122,23 +141,63 @@ namespace log4net.loggly
         /// </summary>
         /// <param name="loggingEvent"></param>
         /// <returns></returns>
-        private string getMessageAndObjectInfo(LoggingEvent loggingEvent, out object objInfo)
+        private string GetMessageAndObjectInfo(LoggingEvent loggingEvent, out object objInfo)
         {
             string message = string.Empty;
             objInfo = null;
 
-            if (loggingEvent.MessageObject.GetType() == typeof(string)
-                //if it is sent by using InfoFormat method then treat it as a string message
+            if (loggingEvent.MessageObject != null)
+            {
+                if (loggingEvent.MessageObject.GetType() == typeof(string)
+                    //if it is sent by using InfoFormat method then treat it as a string message
                 || loggingEvent.MessageObject.GetType().FullName == "log4net.Util.SystemStringFormat"
                 || loggingEvent.MessageObject.GetType().FullName.Contains("StringFormatFormattedMessage"))
-            {
-                message = loggingEvent.MessageObject.ToString();
+                {
+                    message = loggingEvent.MessageObject.ToString();
+                }
+                else
+                {
+                    objInfo = loggingEvent.MessageObject;
+                }
             }
             else
             {
-                objInfo = loggingEvent.MessageObject;
+                //adding message as null so that the Loggly user
+                //can know that a null object is logged.
+                message = "null";
             }
             return message;
+        }
+
+        /// <summary>
+        /// Returns whether to include stack array or not
+        /// Also outs the stack array if needed to include
+        /// </summary>
+        /// <param name="stack"></param>
+        /// <param name="includeStackKey"></param>
+        /// <returns></returns>
+        private bool IncludeThreadStackValues(log4net.Util.ThreadContextStack stack,
+            out string[] stackArray)
+        {
+            if (stack != null && stack.Count > 0)
+            {
+                stackArray = new string[stack.Count];
+                for (int n = stack.Count - 1; n >= 0; n--)
+                {
+                    stackArray[n] = stack.Pop();
+                }
+
+                foreach (string stackValue in stackArray)
+                {
+                    stack.Push(stackValue);
+                }
+                return true;
+            }
+            else
+            {
+                stackArray = null;
+                return false;
+            }
         }
     }
 }
